@@ -402,6 +402,150 @@ def _unclaimed_command(argv: list[str]) -> None:
         sys.exit(130)
 
 
+def _provider_command(argv: list[str]) -> None:
+    """Handle `cswap provider add|list|remove|use|off|run`.
+
+    Providers (MiniMax, OpenRouter, ...) are env-var profiles for an
+    Anthropic-compatible endpoint, kept apart from the OAuth account slots.
+    """
+    import getpass
+
+    from claude_swap.providers import (
+        AUTH_TOKEN_VAR,
+        MODEL_VARS,
+        PRESETS,
+        ProviderStore,
+        claude_settings_path,
+        launch_env,
+        mask,
+    )
+
+    if "--" in argv:
+        split = argv.index("--")
+        argv, claude_args = argv[:split], argv[split + 1 :]
+    else:
+        claude_args = []
+
+    parser = argparse.ArgumentParser(
+        prog=f"{_prog_name()} provider",
+        description=(
+            "Use a third-party Anthropic-compatible provider (e.g. MiniMax "
+            "Token Plan) alongside your Claude accounts."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+Examples:
+  cswap provider add minimax --preset minimax      # prompts for the API key
+  cswap provider run minimax                       # this terminal only
+  cswap provider run minimax -- --resume           # args after '--' go to claude
+  cswap provider use minimax                       # global (~/.claude/settings.json)
+  cswap provider off                               # back to your Claude login
+  cswap provider add or --base-url https://openrouter.ai/api \\
+      --model anthropic/claude-sonnet-4.6
+
+Presets: {", ".join(PRESETS)}
+Switching to a Claude account (`cswap switch ...`) turns a global provider off.
+        """,
+    )
+    sub = parser.add_subparsers(dest="action", required=True, metavar="ACTION")
+    p_add = sub.add_parser("add", help="Add or replace a provider")
+    p_add.add_argument("name")
+    p_add.add_argument("--preset", choices=sorted(PRESETS))
+    p_add.add_argument("--base-url", help="Anthropic-compatible endpoint URL")
+    p_add.add_argument("--key", help="API key ('-' reads stdin; omit to be prompted)")
+    p_add.add_argument("--model", help="Model for every tier (sets ANTHROPIC_MODEL and defaults)")
+    p_add.add_argument("--env", action="append", default=[], metavar="VAR=VALUE",
+                       help="Extra env var (repeatable)")
+    p_add.add_argument("--force", action="store_true", help="Replace an existing provider")
+    sub.add_parser("list", help="List providers")
+    p_rm = sub.add_parser("remove", help="Remove a provider")
+    p_rm.add_argument("name")
+    p_use = sub.add_parser("use", help="Activate globally (writes ~/.claude/settings.json env)")
+    p_use.add_argument("name")
+    sub.add_parser("off", help="Deactivate the global provider, restoring previous settings")
+    p_run = sub.add_parser("run", help="Launch claude on a provider in this terminal only")
+    p_run.add_argument("name")
+    args = parser.parse_args(argv)
+
+    store = ProviderStore(paths.get_backup_root())
+    try:
+        if args.action == "add":
+            env = dict(PRESETS.get(args.preset, {}))
+            if args.base_url:
+                env["ANTHROPIC_BASE_URL"] = args.base_url
+            if args.model:
+                env.update(dict.fromkeys(MODEL_VARS, args.model))
+            for item in args.env:
+                var, sep, value = item.partition("=")
+                if not sep or not var:
+                    raise ClaudeSwitchError(f"--env expects VAR=VALUE, got '{item}'")
+                env[var] = value
+            key = args.key
+            if key == "-":
+                key = sys.stdin.readline()
+            elif key is None:
+                key = getpass.getpass(f"API key for {args.name}: ")
+            env[AUTH_TOKEN_VAR] = key.strip()
+            store.add(args.name, env, force=args.force)
+            print(f"{accent('Added')} provider '{args.name}' → {env['ANTHROPIC_BASE_URL']}")
+        elif args.action == "list":
+            data = store.load()
+            active = (data["active"] or {}).get("name")
+            if not data["providers"]:
+                print(dimmed("No providers. Add one: cswap provider add minimax --preset minimax"))
+            for name, p in data["providers"].items():
+                env = p["env"]
+                mark = accent(" (active)") if name == active else ""
+                model = env.get("ANTHROPIC_MODEL", "")
+                print(f"{bolded(name)}{mark}  {env.get('ANTHROPIC_BASE_URL')}  "
+                      f"{muted(model)}  {muted(mask(env.get(AUTH_TOKEN_VAR, '')))}")
+        elif args.action == "remove":
+            store.remove(args.name)
+            print(f"{accent('Removed')} provider '{args.name}'")
+        elif args.action == "use":
+            store.use(args.name)
+            print(f"{accent('Using')} provider '{args.name}' globally "
+                  f"{muted(f'(env written to {claude_settings_path()})')}")
+            print(dimmed("Restart Claude Code to pick it up. `cswap provider off` to undo."))
+        elif args.action == "off":
+            name = store.off()
+            if name:
+                print(f"{accent('Turned off')} provider '{name}' — Claude Code uses your account login again")
+            else:
+                print(dimmed("No provider is active."))
+        elif args.action == "run":
+            import shutil
+
+            from claude_swap.session import SessionManager
+
+            env = store.get(args.name)["env"]
+            active = store.active_name()
+            if active and active != args.name:
+                warning(f"Provider '{active}' is active globally; its settings.json "
+                        "env may override this launch. Run `cswap provider off` first.")
+            claude_bin = shutil.which("claude")
+            if not claude_bin:
+                raise ClaudeSwitchError("'claude' was not found on PATH. Install Claude Code first.")
+            print(f"{accent('Launching')} provider '{args.name}' {muted('[this terminal]')}")
+            SessionManager._exec(claude_bin, claude_args, launch_env(env, dict(os.environ)))
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{dimmed('Operation cancelled')}")
+        sys.exit(130)
+
+
+def _clear_provider_on_switch() -> None:
+    """A switch to a Claude account means "use that account": drop any global provider."""
+    from claude_swap.providers import ProviderStore
+
+    name = ProviderStore(paths.get_backup_root()).off()
+    if name:
+        print(muted(f"Turned off provider '{name}' so the switched account is used."),
+              file=sys.stderr)
+
+
 def _swap_command(argv: list[str]) -> None:
     """Handle `cswap swap NUM|EMAIL|ALIAS NUM|EMAIL|ALIAS`.
 
@@ -1013,6 +1157,9 @@ def main() -> None:
     if argv and argv[0] == "alias":
         _alias_command(argv[1:])
         return
+    if argv and argv[0] == "provider":
+        _provider_command(argv[1:])
+        return
     if argv and argv[0] == "swap":
         _swap_command(argv[1:])
         return
@@ -1049,6 +1196,7 @@ Commands:
   %(prog)s enable <num|email>         return a disabled account to rotation
   %(prog)s run <num|email> [-- ...]   run as an account, this terminal only
   %(prog)s run                        run the current dir's mapped account
+  %(prog)s provider add|use|run|off   third-party providers (e.g. MiniMax)
   %(prog)s map <num|email> [path]     map a directory to an account
   %(prog)s map                        list directory mappings
   %(prog)s unmap [path]               remove a directory mapping
@@ -1448,10 +1596,12 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
             if payload is not None and models:
                 payload["models"] = list(models)
                 payload["modelSource"] = model_source
+            _clear_provider_on_switch()
         elif args.switch_to:
             payload = switcher.switch_to(
                 args.switch_to, json_output=args.json, force=args.force
             )
+            _clear_provider_on_switch()
         elif args.status:
             payload = switcher.status(json_output=args.json)
         elif args.purge:

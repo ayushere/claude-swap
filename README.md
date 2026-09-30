@@ -162,6 +162,21 @@ Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap
 
 </details>
 
+### Third-party providers (MiniMax Token Plan, OpenRouter, ...)
+
+Use an Anthropic-compatible provider next to your Claude accounts. Providers are kept separate from account slots (they're env-var profiles, not OAuth logins), so they never touch your stored credentials.
+
+```bash
+cswap provider add minimax --preset minimax      # prompts for your MiniMax key (minimax-cn for China)
+cswap provider run minimax                       # this terminal only; other terminals keep your account
+cswap provider use minimax                       # global: writes the env into ~/.claude/settings.json
+cswap provider off                               # restore settings.json to exactly what it was
+cswap provider list
+cswap provider add or --base-url https://openrouter.ai/api --model anthropic/claude-sonnet-4.6
+```
+
+`cswap switch ...` to a Claude account turns a global provider off automatically. Keys are stored in `providers.json` in the backup directory (mode 0600); `use` also puts the key in `settings.json` and restricts that file to its owner.
+
 ### Interactive dashboard (TUI)
 
 Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. `cswap watch` opens it straight to the live monitor. Works on macOS, Linux, and Windows.

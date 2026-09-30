@@ -639,7 +639,8 @@ class SessionManager:
             )
         self._exec(claude_bin, claude_args, env=dict(os.environ))
 
-    def _exec(self, claude_bin: str, claude_args: list[str], env: dict[str, str]) -> NoReturn:
+    @staticmethod
+    def _exec(claude_bin: str, claude_args: list[str], env: dict[str, str]) -> NoReturn:
         """Hand the terminal over to claude. Never returns.
 
         POSIX: ``execvpe`` replaces the cswap process entirely (the lock is
